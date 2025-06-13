@@ -1,0 +1,173 @@
+#!/bin/bash
+
+# 回收站系统 - 安全删除脚本
+# 用法: trash [选项] <文件或目录>
+
+# 设置回收站目录
+TRASH_DIR="$HOME/.trash"
+TRASH_INFO_DIR="$TRASH_DIR/info"
+TRASH_FILES_DIR="$TRASH_DIR/files"
+
+# 创建回收站目录结构
+create_trash_dirs() {
+    mkdir -p "$TRASH_INFO_DIR"
+    mkdir -p "$TRASH_FILES_DIR"
+}
+
+# 显示帮助信息
+show_help() {
+    echo "回收站系统 - 安全删除工具"
+    echo ""
+    echo "用法: trash [选项] <文件或目录>"
+    echo ""
+    echo "选项:"
+    echo "  -h, --help     显示此帮助信息"
+    echo "  -f, --force    强制删除，不询问确认"
+    echo "  -r, --recursive 递归删除目录"
+    echo "  -v, --verbose  显示详细信息"
+    echo ""
+    echo "示例:"
+    echo "  trash file.txt        # 将file.txt移到回收站"
+    echo "  trash -r folder/      # 将文件夹移到回收站"
+    echo "  trash -f file.txt     # 强制移到回收站，不询问"
+    echo ""
+    echo "相关命令:"
+    echo "  trash-list            # 查看回收站内容"
+    echo "  trash-restore         # 恢复文件"
+    echo "  trash-empty           # 清空回收站"
+}
+
+# 生成唯一的文件名
+generate_unique_name() {
+    local basename="$1"
+    local counter=1
+    local unique_name="$basename"
+    
+    while [[ -e "$TRASH_FILES_DIR/$unique_name" ]]; do
+        unique_name="${basename}_${counter}"
+        ((counter++))
+    done
+    
+    echo "$unique_name"
+}
+
+# 移动文件到回收站
+move_to_trash() {
+    local file_path="$1"
+    local force="$2"
+    local verbose="$3"
+    
+    # 检查文件是否存在
+    if [[ ! -e "$file_path" ]]; then
+        echo "错误: 文件或目录 '$file_path' 不存在" >&2
+        return 1
+    fi
+    
+    # 获取绝对路径
+    local abs_path=$(realpath "$file_path")
+    local basename=$(basename "$abs_path")
+    
+    # 生成唯一的回收站文件名
+    local trash_name=$(generate_unique_name "$basename")
+    
+    # 如果不是强制模式，询问确认
+    if [[ "$force" != "true" ]]; then
+        echo -n "确定要将 '$file_path' 移到回收站吗? [y/N]: "
+        read -r response
+        case "$response" in
+            [yY]|[yY][eE][sS])
+                ;;
+            *)
+                echo "操作已取消"
+                return 0
+                ;;
+        esac
+    fi
+    
+    # 创建回收站目录
+    create_trash_dirs
+    
+    # 移动文件到回收站
+    if mv "$abs_path" "$TRASH_FILES_DIR/$trash_name"; then
+        # 创建信息文件
+        local info_file="$TRASH_INFO_DIR/${trash_name}.trashinfo"
+        cat > "$info_file" << EOF
+[Trash Info]
+Path=$abs_path
+DeletionDate=$(date +%Y-%m-%dT%H:%M:%S)
+EOF
+        
+        if [[ "$verbose" == "true" ]]; then
+            echo "已将 '$file_path' 移动到回收站"
+        fi
+        
+        return 0
+    else
+        echo "错误: 无法移动 '$file_path' 到回收站" >&2
+        return 1
+    fi
+}
+
+# 主函数
+main() {
+    local force=false
+    local verbose=false
+    local recursive=false
+    local files=()
+    
+    # 解析命令行参数
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -f|--force)
+                force=true
+                shift
+                ;;
+            -v|--verbose)
+                verbose=true
+                shift
+                ;;
+            -r|--recursive)
+                recursive=true
+                shift
+                ;;
+            -*)
+                echo "错误: 未知选项 '$1'" >&2
+                echo "使用 'trash --help' 查看帮助信息"
+                exit 1
+                ;;
+            *)
+                files+=("$1")
+                shift
+                ;;
+        esac
+    done
+    
+    # 检查是否有文件参数
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo "错误: 请指定要删除的文件或目录" >&2
+        echo "使用 'trash --help' 查看帮助信息"
+        exit 1
+    fi
+    
+    # 处理每个文件
+    local exit_code=0
+    for file in "${files[@]}"; do
+        if [[ -d "$file" && "$recursive" != "true" ]]; then
+            echo "错误: '$file' 是一个目录，请使用 -r 选项" >&2
+            exit_code=1
+        else
+            if ! move_to_trash "$file" "$force" "$verbose"; then
+                exit_code=1
+            fi
+        fi
+    done
+    
+    exit $exit_code
+}
+
+# 执行主函数
+main "$@" 

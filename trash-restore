@@ -1,0 +1,286 @@
+#!/bin/bash
+
+# 回收站文件恢复工具
+# 用法: trash-restore [选项] [文件名]
+
+# 设置回收站目录
+TRASH_DIR="$HOME/.trash"
+TRASH_INFO_DIR="$TRASH_DIR/info"
+TRASH_FILES_DIR="$TRASH_DIR/files"
+
+# 显示帮助信息
+show_help() {
+    echo "回收站文件恢复工具"
+    echo ""
+    echo "用法: trash-restore [选项] [文件名]"
+    echo ""
+    echo "选项:"
+    echo "  -h, --help     显示此帮助信息"
+    echo "  -i, --interactive 交互式选择要恢复的文件"
+    echo "  -a, --all      恢复所有文件"
+    echo "  -f, --force    强制恢复，覆盖已存在的文件"
+    echo ""
+    echo "示例:"
+    echo "  trash-restore file.txt    # 恢复指定文件"
+    echo "  trash-restore -i          # 交互式选择文件恢复"
+    echo "  trash-restore -a          # 恢复所有文件"
+}
+
+# 检查目标路径是否可以恢复
+can_restore() {
+    local target_path="$1"
+    local force="$2"
+    
+    if [[ -e "$target_path" ]]; then
+        if [[ "$force" == "true" ]]; then
+            return 0
+        else
+            echo "警告: 文件 '$target_path' 已存在"
+            echo -n "是否覆盖? [y/N]: "
+            read -r response
+            case "$response" in
+                [yY]|[yY][eE][sS])
+                    return 0
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
+        fi
+    fi
+    
+    return 0
+}
+
+# 恢复单个文件
+restore_file() {
+    local trash_name="$1"
+    local force="$2"
+    
+    local info_file="$TRASH_INFO_DIR/${trash_name}.trashinfo"
+    local trash_file="$TRASH_FILES_DIR/$trash_name"
+    
+    # 检查文件是否存在
+    if [[ ! -f "$info_file" ]]; then
+        echo "错误: 找不到文件 '$trash_name' 的信息" >&2
+        return 1
+    fi
+    
+    if [[ ! -e "$trash_file" ]]; then
+        echo "错误: 回收站中找不到文件 '$trash_name'" >&2
+        return 1
+    fi
+    
+    # 读取原始路径
+    local original_path=""
+    while IFS='=' read -r key value; do
+        if [[ "$key" == "Path" ]]; then
+            original_path="$value"
+            break
+        fi
+    done < "$info_file"
+    
+    if [[ -z "$original_path" ]]; then
+        echo "错误: 无法读取文件 '$trash_name' 的原始路径" >&2
+        return 1
+    fi
+    
+    # 检查是否可以恢复
+    if ! can_restore "$original_path" "$force"; then
+        echo "跳过恢复 '$trash_name'"
+        return 0
+    fi
+    
+    # 创建目标目录（如果需要）
+    local target_dir=$(dirname "$original_path")
+    if [[ ! -d "$target_dir" ]]; then
+        echo "创建目录: $target_dir"
+        mkdir -p "$target_dir"
+    fi
+    
+    # 恢复文件
+    if mv "$trash_file" "$original_path"; then
+        # 删除信息文件
+        rm -f "$info_file"
+        echo "已恢复: $trash_name -> $original_path"
+        return 0
+    else
+        echo "错误: 无法恢复文件 '$trash_name'" >&2
+        return 1
+    fi
+}
+
+# 交互式恢复
+interactive_restore() {
+    local force="$1"
+    
+    # 检查回收站是否为空
+    if [[ ! -d "$TRASH_INFO_DIR" ]]; then
+        echo "回收站为空"
+        return 0
+    fi
+    
+    local info_files=("$TRASH_INFO_DIR"/*.trashinfo)
+    if [[ ! -e "${info_files[0]}" ]]; then
+        echo "回收站为空"
+        return 0
+    fi
+    
+    echo "回收站中的文件:"
+    echo ""
+    
+    # 构建文件列表
+    local items=()
+    local index=1
+    
+    for info_file in "${info_files[@]}"; do
+        if [[ -f "$info_file" ]]; then
+            local trash_name=$(basename "$info_file" .trashinfo)
+            local original_path=""
+            local deletion_date=""
+            
+            while IFS='=' read -r key value; do
+                case "$key" in
+                    "Path")
+                        original_path="$value"
+                        ;;
+                    "DeletionDate")
+                        deletion_date="$value"
+                        ;;
+                esac
+            done < "$info_file"
+            
+            printf "%2d) %-20s -> %s\n" "$index" "$trash_name" "$original_path"
+            items+=("$trash_name")
+            ((index++))
+        fi
+    done
+    
+    echo ""
+    echo "请选择要恢复的文件 (输入数字，多个数字用空格分隔，'a' 表示全部，'q' 退出):"
+    read -r selection
+    
+    case "$selection" in
+        q|Q)
+            echo "已取消"
+            return 0
+            ;;
+        a|A)
+            echo "恢复所有文件..."
+            for item in "${items[@]}"; do
+                restore_file "$item" "$force"
+            done
+            ;;
+        *)
+            for num in $selection; do
+                if [[ "$num" =~ ^[0-9]+$ ]] && [[ $num -ge 1 ]] && [[ $num -le ${#items[@]} ]]; then
+                    local item_index=$((num - 1))
+                    restore_file "${items[$item_index]}" "$force"
+                else
+                    echo "警告: 无效的选择: $num"
+                fi
+            done
+            ;;
+    esac
+}
+
+# 恢复所有文件
+restore_all() {
+    local force="$1"
+    
+    if [[ ! -d "$TRASH_INFO_DIR" ]]; then
+        echo "回收站为空"
+        return 0
+    fi
+    
+    local info_files=("$TRASH_INFO_DIR"/*.trashinfo)
+    if [[ ! -e "${info_files[0]}" ]]; then
+        echo "回收站为空"
+        return 0
+    fi
+    
+    local restored=0
+    local failed=0
+    
+    for info_file in "${info_files[@]}"; do
+        if [[ -f "$info_file" ]]; then
+            local trash_name=$(basename "$info_file" .trashinfo)
+            if restore_file "$trash_name" "$force"; then
+                ((restored++))
+            else
+                ((failed++))
+            fi
+        fi
+    done
+    
+    echo ""
+    echo "恢复完成: 成功 $restored 个, 失败 $failed 个"
+}
+
+# 主函数
+main() {
+    local interactive=false
+    local restore_all_files=false
+    local force=false
+    local files=()
+    
+    # 解析命令行参数
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -i|--interactive)
+                interactive=true
+                shift
+                ;;
+            -a|--all)
+                restore_all_files=true
+                shift
+                ;;
+            -f|--force)
+                force=true
+                shift
+                ;;
+            -*)
+                echo "错误: 未知选项 '$1'" >&2
+                echo "使用 'trash-restore --help' 查看帮助信息"
+                exit 1
+                ;;
+            *)
+                files+=("$1")
+                shift
+                ;;
+        esac
+    done
+    
+    # 检查回收站目录
+    if [[ ! -d "$TRASH_DIR" ]]; then
+        echo "错误: 回收站不存在" >&2
+        exit 1
+    fi
+    
+    # 执行相应操作
+    if [[ "$interactive" == "true" ]]; then
+        interactive_restore "$force"
+    elif [[ "$restore_all_files" == "true" ]]; then
+        restore_all "$force"
+    elif [[ ${#files[@]} -gt 0 ]]; then
+        # 恢复指定文件
+        local exit_code=0
+        for file in "${files[@]}"; do
+            if ! restore_file "$file" "$force"; then
+                exit_code=1
+            fi
+        done
+        exit $exit_code
+    else
+        echo "错误: 请指定要恢复的文件或使用 -i 进行交互式恢复" >&2
+        echo "使用 'trash-restore --help' 查看帮助信息"
+        exit 1
+    fi
+}
+
+# 执行主函数
+main "$@" 

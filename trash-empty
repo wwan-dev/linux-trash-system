@@ -1,0 +1,276 @@
+#!/bin/bash
+
+# 回收站清空工具
+# 用法: trash-empty [选项]
+
+# 设置回收站目录
+TRASH_DIR="$HOME/.trash"
+TRASH_INFO_DIR="$TRASH_DIR/info"
+TRASH_FILES_DIR="$TRASH_DIR/files"
+
+# 显示帮助信息
+show_help() {
+    echo "回收站清空工具"
+    echo ""
+    echo "用法: trash-empty [选项]"
+    echo ""
+    echo "选项:"
+    echo "  -h, --help     显示此帮助信息"
+    echo "  -f, --force    强制清空，不询问确认"
+    echo "  -d, --days N   删除N天前的文件"
+    echo ""
+    echo "示例:"
+    echo "  trash-empty           # 清空整个回收站"
+    echo "  trash-empty -f        # 强制清空，不询问"
+    echo "  trash-empty -d 7      # 删除7天前的文件"
+}
+
+# 清空整个回收站
+empty_all() {
+    local force="$1"
+    
+    # 检查回收站是否存在
+    if [[ ! -d "$TRASH_DIR" ]]; then
+        echo "回收站不存在或已为空"
+        return 0
+    fi
+    
+    # 计算统计信息
+    local count=0
+    local total_size=0
+    
+    if [[ -d "$TRASH_INFO_DIR" ]]; then
+        for info_file in "$TRASH_INFO_DIR"/*.trashinfo; do
+            if [[ -f "$info_file" ]]; then
+                ((count++))
+                local trash_name=$(basename "$info_file" .trashinfo)
+                local trash_file="$TRASH_FILES_DIR/$trash_name"
+                
+                if [[ -e "$trash_file" ]]; then
+                    if [[ -d "$trash_file" ]]; then
+                        local dir_size=$(du -sb "$trash_file" 2>/dev/null | cut -f1)
+                        total_size=$((total_size + dir_size))
+                    else
+                        local file_size=$(stat -c%s "$trash_file" 2>/dev/null || echo 0)
+                        total_size=$((total_size + file_size))
+                    fi
+                fi
+            fi
+        done
+    fi
+    
+    if [[ $count -eq 0 ]]; then
+        echo "回收站已为空"
+        return 0
+    fi
+    
+    # 格式化大小
+    local size_str
+    if [[ $total_size -lt 1024 ]]; then
+        size_str="${total_size}B"
+    elif [[ $total_size -lt 1048576 ]]; then
+        size_str="$(( total_size / 1024 ))K"
+    elif [[ $total_size -lt 1073741824 ]]; then
+        size_str="$(( total_size / 1048576 ))M"
+    else
+        size_str="$(( total_size / 1073741824 ))G"
+    fi
+    
+    # 询问确认
+    if [[ "$force" != "true" ]]; then
+        echo "将永久删除 $count 个项目, 总大小: $size_str"
+        echo -n "确定要清空回收站吗? [y/N]: "
+        read -r response
+        case "$response" in
+            [yY]|[yY][eE][sS])
+                ;;
+            *)
+                echo "操作已取消"
+                return 0
+                ;;
+        esac
+    fi
+    
+    # 删除所有文件
+    local deleted=0
+    local failed=0
+    
+    if [[ -d "$TRASH_FILES_DIR" ]]; then
+        for trash_file in "$TRASH_FILES_DIR"/*; do
+            if [[ -e "$trash_file" ]]; then
+                if rm -rf "$trash_file" 2>/dev/null; then
+                    ((deleted++))
+                else
+                    ((failed++))
+                fi
+            fi
+        done
+    fi
+    
+    # 删除所有信息文件
+    if [[ -d "$TRASH_INFO_DIR" ]]; then
+        rm -f "$TRASH_INFO_DIR"/*.trashinfo 2>/dev/null
+    fi
+    
+    echo "清空完成: 删除了 $deleted 个项目"
+    if [[ $failed -gt 0 ]]; then
+        echo "警告: $failed 个项目删除失败"
+    fi
+}
+
+# 清空指定天数前的文件
+empty_old() {
+    local days="$1"
+    local force="$2"
+    
+    # 检查回收站是否存在
+    if [[ ! -d "$TRASH_INFO_DIR" ]]; then
+        echo "回收站不存在或已为空"
+        return 0
+    fi
+    
+    # 计算截止时间
+    local cutoff_time=$(date -d "$days days ago" +%s)
+    
+    # 收集要删除的文件
+    local old_files=()
+    local old_info_files=()
+    local total_size=0
+    
+    for info_file in "$TRASH_INFO_DIR"/*.trashinfo; do
+        if [[ -f "$info_file" ]]; then
+            local trash_name=$(basename "$info_file" .trashinfo)
+            local trash_file="$TRASH_FILES_DIR/$trash_name"
+            local deletion_date=""
+            
+            # 读取删除时间
+            while IFS='=' read -r key value; do
+                if [[ "$key" == "DeletionDate" ]]; then
+                    deletion_date="$value"
+                    break
+                fi
+            done < "$info_file"
+            
+            if [[ -n "$deletion_date" ]]; then
+                local file_time=$(date -d "$deletion_date" +%s 2>/dev/null)
+                if [[ -n "$file_time" && $file_time -lt $cutoff_time ]]; then
+                    old_files+=("$trash_file")
+                    old_info_files+=("$info_file")
+                    
+                    # 计算大小
+                    if [[ -e "$trash_file" ]]; then
+                        if [[ -d "$trash_file" ]]; then
+                            local dir_size=$(du -sb "$trash_file" 2>/dev/null | cut -f1)
+                            total_size=$((total_size + dir_size))
+                        else
+                            local file_size=$(stat -c%s "$trash_file" 2>/dev/null || echo 0)
+                            total_size=$((total_size + file_size))
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    done
+    
+    if [[ ${#old_files[@]} -eq 0 ]]; then
+        echo "没有超过 $days 天的文件"
+        return 0
+    fi
+    
+    # 格式化大小
+    local size_str
+    if [[ $total_size -lt 1024 ]]; then
+        size_str="${total_size}B"
+    elif [[ $total_size -lt 1048576 ]]; then
+        size_str="$(( total_size / 1024 ))K"
+    elif [[ $total_size -lt 1073741824 ]]; then
+        size_str="$(( total_size / 1048576 ))M"
+    else
+        size_str="$(( total_size / 1073741824 ))G"
+    fi
+    
+    # 询问确认
+    if [[ "$force" != "true" ]]; then
+        echo "将永久删除 ${#old_files[@]} 个超过 $days 天的项目, 总大小: $size_str"
+        echo -n "确定继续吗? [y/N]: "
+        read -r response
+        case "$response" in
+            [yY]|[yY][eE][sS])
+                ;;
+            *)
+                echo "操作已取消"
+                return 0
+                ;;
+        esac
+    fi
+    
+    # 删除文件
+    local deleted=0
+    local failed=0
+    
+    for i in "${!old_files[@]}"; do
+        local trash_file="${old_files[$i]}"
+        local info_file="${old_info_files[$i]}"
+        
+        if rm -rf "$trash_file" 2>/dev/null; then
+            rm -f "$info_file" 2>/dev/null
+            ((deleted++))
+        else
+            ((failed++))
+        fi
+    done
+    
+    echo "清理完成: 删除了 $deleted 个超过 $days 天的项目"
+    if [[ $failed -gt 0 ]]; then
+        echo "警告: $failed 个项目删除失败"
+    fi
+}
+
+# 主函数
+main() {
+    local force=false
+    local days=""
+    
+    # 解析命令行参数
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -f|--force)
+                force=true
+                shift
+                ;;
+            -d|--days)
+                if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                    days="$2"
+                    shift 2
+                else
+                    echo "错误: -d 选项需要一个数字参数" >&2
+                    exit 1
+                fi
+                ;;
+            -*)
+                echo "错误: 未知选项 '$1'" >&2
+                echo "使用 'trash-empty --help' 查看帮助信息"
+                exit 1
+                ;;
+            *)
+                echo "错误: 不支持的参数 '$1'" >&2
+                echo "使用 'trash-empty --help' 查看帮助信息"
+                exit 1
+                ;;
+        esac
+    done
+    
+    # 执行相应操作
+    if [[ -n "$days" ]]; then
+        empty_old "$days" "$force"
+    else
+        empty_all "$force"
+    fi
+}
+
+# 执行主函数
+main "$@" 

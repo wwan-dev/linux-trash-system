@@ -1,0 +1,215 @@
+#!/bin/bash
+
+# 回收站列表查看工具
+# 用法: trash-list [选项]
+
+# 设置回收站目录
+TRASH_DIR="$HOME/.trash"
+TRASH_INFO_DIR="$TRASH_DIR/info"
+TRASH_FILES_DIR="$TRASH_DIR/files"
+
+# 显示帮助信息
+show_help() {
+    echo "回收站列表查看工具"
+    echo ""
+    echo "用法: trash-list [选项]"
+    echo ""
+    echo "选项:"
+    echo "  -h, --help     显示此帮助信息"
+    echo "  -l, --long     显示详细信息"
+    echo "  -s, --size     显示文件大小"
+    echo "  -t, --time     按删除时间排序"
+    echo ""
+    echo "示例:"
+    echo "  trash-list           # 列出回收站中的文件"
+    echo "  trash-list -l        # 显示详细信息"
+    echo "  trash-list -s        # 显示文件大小"
+}
+
+# 格式化文件大小
+format_size() {
+    local size=$1
+    if [[ $size -lt 1024 ]]; then
+        echo "${size}B"
+    elif [[ $size -lt 1048576 ]]; then
+        echo "$(( size / 1024 ))K"
+    elif [[ $size -lt 1073741824 ]]; then
+        echo "$(( size / 1048576 ))M"
+    else
+        echo "$(( size / 1073741824 ))G"
+    fi
+}
+
+# 格式化时间
+format_time() {
+    local timestamp="$1"
+    date -d "$timestamp" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "$timestamp"
+}
+
+# 列出回收站内容
+list_trash() {
+    local show_long="$1"
+    local show_size="$2"
+    local sort_by_time="$3"
+    
+    # 检查回收站是否存在
+    if [[ ! -d "$TRASH_INFO_DIR" ]]; then
+        echo "回收站为空或不存在"
+        return 0
+    fi
+    
+    # 检查是否有文件
+    local info_files=("$TRASH_INFO_DIR"/*.trashinfo)
+    if [[ ! -e "${info_files[0]}" ]]; then
+        echo "回收站为空"
+        return 0
+    fi
+    
+    # 准备数据数组
+    local items=()
+    
+    for info_file in "${info_files[@]}"; do
+        if [[ -f "$info_file" ]]; then
+            local trash_name=$(basename "$info_file" .trashinfo)
+            local trash_file="$TRASH_FILES_DIR/$trash_name"
+            
+            # 读取信息文件
+            local original_path=""
+            local deletion_date=""
+            
+            while IFS='=' read -r key value; do
+                case "$key" in
+                    "Path")
+                        original_path="$value"
+                        ;;
+                    "DeletionDate")
+                        deletion_date="$value"
+                        ;;
+                esac
+            done < "$info_file"
+            
+            # 获取文件信息
+            local size=0
+            local file_type="?"
+            if [[ -e "$trash_file" ]]; then
+                if [[ -d "$trash_file" ]]; then
+                    file_type="目录"
+                    size=$(du -sb "$trash_file" 2>/dev/null | cut -f1)
+                else
+                    file_type="文件"
+                    size=$(stat -c%s "$trash_file" 2>/dev/null || echo 0)
+                fi
+            fi
+            
+            # 构建项目信息
+            local item_info="$trash_name|$original_path|$deletion_date|$size|$file_type"
+            items+=("$item_info")
+        fi
+    done
+    
+    # 排序
+    if [[ "$sort_by_time" == "true" ]]; then
+        # 按删除时间排序
+        printf '%s\n' "${items[@]}" | sort -t'|' -k3 -r
+    else
+        # 按文件名排序
+        printf '%s\n' "${items[@]}" | sort -t'|' -k1
+    fi | while IFS='|' read -r trash_name original_path deletion_date size file_type; do
+        if [[ "$show_long" == "true" ]]; then
+            # 详细模式
+            printf "%-20s %s -> %s\n" "$trash_name" "$file_type" "$original_path"
+            printf "  删除时间: %s\n" "$(format_time "$deletion_date")"
+            if [[ "$show_size" == "true" ]]; then
+                printf "  大小: %s\n" "$(format_size "$size")"
+            fi
+            echo ""
+        else
+            # 简单模式
+            if [[ "$show_size" == "true" ]]; then
+                printf "%-20s %8s %s -> %s\n" "$trash_name" "$(format_size "$size")" "$file_type" "$original_path"
+            else
+                printf "%-20s %s -> %s\n" "$trash_name" "$file_type" "$original_path"
+            fi
+        fi
+    done
+}
+
+# 显示回收站统计信息
+show_stats() {
+    if [[ ! -d "$TRASH_INFO_DIR" ]]; then
+        echo "回收站统计: 0 个项目"
+        return
+    fi
+    
+    local count=0
+    local total_size=0
+    
+    for info_file in "$TRASH_INFO_DIR"/*.trashinfo; do
+        if [[ -f "$info_file" ]]; then
+            ((count++))
+            local trash_name=$(basename "$info_file" .trashinfo)
+            local trash_file="$TRASH_FILES_DIR/$trash_name"
+            
+            if [[ -e "$trash_file" ]]; then
+                if [[ -d "$trash_file" ]]; then
+                    local dir_size=$(du -sb "$trash_file" 2>/dev/null | cut -f1)
+                    total_size=$((total_size + dir_size))
+                else
+                    local file_size=$(stat -c%s "$trash_file" 2>/dev/null || echo 0)
+                    total_size=$((total_size + file_size))
+                fi
+            fi
+        fi
+    done
+    
+    echo "回收站统计: $count 个项目, 总大小: $(format_size $total_size)"
+}
+
+# 主函数
+main() {
+    local show_long=false
+    local show_size=false
+    local sort_by_time=false
+    
+    # 解析命令行参数
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -l|--long)
+                show_long=true
+                shift
+                ;;
+            -s|--size)
+                show_size=true
+                shift
+                ;;
+            -t|--time)
+                sort_by_time=true
+                shift
+                ;;
+            -*)
+                echo "错误: 未知选项 '$1'" >&2
+                echo "使用 'trash-list --help' 查看帮助信息"
+                exit 1
+                ;;
+            *)
+                echo "错误: 不支持的参数 '$1'" >&2
+                echo "使用 'trash-list --help' 查看帮助信息"
+                exit 1
+                ;;
+        esac
+    done
+    
+    # 显示统计信息
+    show_stats
+    echo ""
+    
+    # 列出内容
+    list_trash "$show_long" "$show_size" "$sort_by_time"
+}
+
+# 执行主函数
+main "$@" 
